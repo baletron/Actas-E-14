@@ -1,0 +1,24 @@
+# Datos crudos pesados — regenerables con scrape_resultados.py --raw
+elecciones_2026/raw_v1/
+elecciones_2026/raw_v2/
+
+# PDFs (se bajan con download_actas.py)
+actas/
+*.pdf
+
+# Discovery output
+discovery/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
