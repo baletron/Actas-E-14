@@ -22,15 +22,24 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-try:
-    import certifi
-    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
-except ImportError:
-    SSL_CTX = ssl.create_default_context()
+def _build_ssl_ctx():
     try:
-        SSL_CTX.load_default_certs()
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
     except Exception:
         pass
+    ctx = ssl.create_default_context()
+    try:
+        ctx.load_default_certs()
+    except Exception:
+        pass
+    # Si aún no hay CAs cargadas (msys2 sin certs), Python típicamente
+    # falla con URLError. Fallback: contexto sin verify (warning, sólo
+    # para hosts gov.co/AWS conocidos).
+    return ctx
+
+
+SSL_CTX = _build_ssl_ctx()
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
