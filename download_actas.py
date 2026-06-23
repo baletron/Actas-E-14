@@ -90,44 +90,101 @@ def http_get(url, timeout=30, accept_pdf=False):
 
 
 def fetch_catalog(out_path):
-    """Descarga allTransmissionCodes.json del sitio en vivo."""
+    """Descarga allTransmissionCodes.json del sitio en vivo (con fallback GraphQL)."""
     url = HOST + CATALOG_PATH
-    print(f"Descargando catálogo: {url}")
+    print(f"Intento 1: catálogo estático {url}")
+    for attempt in range(3):
+        try:
+            with http_get(url, timeout=120) as r:
+                data = r.read()
+            if data and data.startswith(b"{"):
+                Path(out_path).write_bytes(data)
+                print(f"OK: {out_path} ({len(data):,} bytes)")
+                return True
+            print(f"  intento {attempt+1}: respuesta no JSON ({len(data)} bytes)")
+        except urllib.error.HTTPError as e:
+            print(f"  intento {attempt+1}: HTTP {e.code}")
+            if e.code == 404:
+                break
+        except Exception as e:
+            print(f"  intento {attempt+1}: {type(e).__name__}: {e}")
+        time.sleep(3 * (attempt + 1))
+
+    print()
+    print("Intento 2: fallback GraphQL (AWS AppSync + Cognito)…")
     try:
-        with http_get(url, timeout=60) as r:
-            data = r.read()
-    except urllib.error.HTTPError as e:
-        print(f"HTTP {e.code}: {e.reason}", file=sys.stderr)
+        from graphql_client import AppSyncClient, query_transmission_codes
+    except ImportError:
+        print("ERROR: graphql_client.py no encontrado", file=sys.stderr)
         return False
+    try:
+        cli = AppSyncClient()
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"ERROR Cognito: {e}", file=sys.stderr)
         return False
-    Path(out_path).write_bytes(data)
-    print(f"Guardado: {out_path} ({len(data):,} bytes)")
-    return True
+
+    print("Consultando departamentos uno por uno (34 deptos)…")
+    all_nodes = {"status11": [], "status3": []}
+    deps = [f"{n:02d}" for n in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                                  14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+                                  25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+                                  40, 60, 99]]
+    for dep in deps:
+        try:
+            r = query_transmission_codes(cli, dep=dep, first=20000)
+        except Exception as e:
+            print(f"  dep {dep}: error {e}")
+            continue
+        n11 = (r.get("data") or {}).get("status11", {}).get("nodes") or []
+        n3 = (r.get("data") or {}).get("status3", {}).get("nodes") or []
+        all_nodes["status11"].extend(n11)
+        all_nodes["status3"].extend(n3)
+        print(f"  dep {dep}: +{len(n11)} status11 / +{len(n3)} status3 "
+              f"| total {len(all_nodes['status11'])}/{len(all_nodes['status3'])}")
+        time.sleep(0.3)
+
+    catalog = {"data": {
+        "status11": {"nodes": all_nodes["status11"]},
+        "status3": {"nodes": all_nodes["status3"]},
+    }}
+    Path(out_path).write_text(json.dumps(catalog, ensure_ascii=False),
+                              encoding="utf-8")
+    total = len(all_nodes["status11"]) + len(all_nodes["status3"])
+    print(f"OK: {out_path} ({total:,} nodes total)")
+    return total > 0
 
 
 def load_catalog(path):
     raw = json.load(open(path, encoding="utf-8"))
     if isinstance(raw, dict) and "data" in raw:
-        # GraphQL wrapper format
+        out = []
         for v in raw["data"].values():
             if isinstance(v, dict) and "edges" in v:
-                return [e["node"] for e in v["edges"]]
-            if isinstance(v, dict) and "nodes" in v:
-                return v["nodes"]
-            if isinstance(v, list):
-                return v
+                out.extend(e["node"] for e in v["edges"])
+            elif isinstance(v, dict) and "nodes" in v:
+                out.extend(v["nodes"])
+            elif isinstance(v, list):
+                out.extend(v)
+        # Dedup por idStand+expectedName
+        seen = set()
+        uniq = []
+        for n in out:
+            k = (n.get("idStand"), n.get("expectedName"))
+            if k not in seen:
+                seen.add(k)
+                uniq.append(n)
+        return uniq
     if isinstance(raw, list):
         return raw
     raise ValueError("Formato catálogo no reconocido")
 
 
-def download_pdf(filename, dest_path, with_uuid=True, max_retries=3):
-    url = build_url(filename, with_uuid)
+def download_pdf(url_path, dest_path, with_uuid=True, max_retries=3):
+    """url_path puede ser solo el filename o el path completo dep/mun/.../hash.pdf"""
+    url = build_url(url_path, with_uuid)
     for attempt in range(max_retries):
         try:
-            with http_get(url, timeout=30, accept_pdf=True) as r:
+            with http_get(url, timeout=60, accept_pdf=True) as r:
                 data = r.read()
             if not data.startswith(b"%PDF"):
                 return ("not-pdf", url, len(data))
@@ -158,7 +215,7 @@ def cmd_fetch_catalog(args):
 def cmd_download(args):
     if args.from_catalog:
         cat = load_catalog(args.from_catalog)
-        print(f"Catálogo cargado: {len(cat):,} mesas")
+        print(f"Catálogo cargado: {len(cat):,} mesas únicas")
         tasks = []
         for node in cat:
             dep = node.get("idDepartmentCode") or node.get("departamento")
@@ -170,6 +227,8 @@ def cmd_download(args):
             expected = node.get("expectedName") or build_filename(
                 corp_acronym, dep, mun, zon, stand, mesa
             )
+            if not all([dep, mun, zon, stand, expected]):
+                continue
             if args.depto and str(dep).zfill(2) != str(args.depto).zfill(2):
                 continue
             tasks.append({
@@ -178,7 +237,8 @@ def cmd_download(args):
                 "mun": str(mun).zfill(3),
                 "zon": str(zon).zfill(3),
                 "stand": str(stand).zfill(2),
-                "mesa": str(mesa).zfill(3),
+                "mesa": str(mesa or "001").zfill(3),
+                "corp": corp_acronym,
             })
     else:
         # Modo enumerativo (sin catálogo) — peligroso, miles de 404s
@@ -217,12 +277,21 @@ def cmd_download(args):
     stats = {"ok": 0, "404": 0, "not-pdf": 0, "err": 0}
     started = time.time()
 
+    def task_url_path(t):
+        return f"{t['dep']}/{t['mun']}/{t['zon']}/{t['stand']}/{t['mesa']}/{t.get('corp', DEFAULT_ACRONYM)}/{t['filename']}"
+
     def task_path(t):
-        return out_dir / t["dep"] / t["mun"] / t["zon"] / t["filename"]
+        return (out_dir / t["dep"] / t["mun"] / t["zon"] / t["stand"]
+                / t["mesa"] / t.get("corp", DEFAULT_ACRONYM) / t["filename"])
+
+    # Skip already-downloaded
+    tasks = [t for t in tasks if not task_path(t).exists()
+             or task_path(t).stat().st_size < 1000]
+    print(f"Tras filtro reanudación: {len(tasks):,} pendientes")
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {
-            ex.submit(download_pdf, t["filename"], task_path(t), True): t
+            ex.submit(download_pdf, task_url_path(t), task_path(t), True): t
             for t in tasks
         }
         for i, fut in enumerate(as_completed(futs), 1):
