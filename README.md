@@ -3,13 +3,49 @@
 Suite de scripts Python (stdlib + certifi) para extraer datos electorales públicos
 desde los portales oficiales de la Registraduría Nacional del Estado Civil.
 
-## Estado actual (2026-06-22)
+## Estado actual (2026-06-23)
 
 - ✅ Resultados JSON (1ra + 2da vuelta) → CSV plano por país / depto / muni
 - ✅ Nomenclator territorial (1224 ámbitos: 1 país, 34 deptos, 1189 munis)
-- ⚠️ PDFs de actas (E-14/E-24/E-26): requiere descubrir patrón URL del portal
-      `escrutiniospresidente2026.registraduria.gov.co` (bloqueado desde sandbox
-      Anthropic, accesible desde red residencial normal)
+- ✅ Patrón URL PDFs actas E-14 **descifrado por ingeniería inversa** del
+      bundle Angular del SPA oficial (Wayback snapshot 2026-06-22)
+- ✅ 1 acta de prueba descargada vía Wayback Machine (Antioquia, muni 127,
+      zona 099, puesto 55, mesa 001)
+- ⚠️ Catálogo completo de hashes SHA256 (122k mesas) requiere acceso a
+      `e14segundavueltapresidente.registraduria.gov.co/assets/temis/divipol_json/allTransmissionCodes.json`
+      desde IP no bloqueada por Akamai (residencial Colombia)
+
+## Patrón URL actas E-14 (descifrado)
+
+```
+https://e14segundavueltapresidente.registraduria.gov.co/assets/temis/pdf/
+    {dep2}/{mun3}/{zon3}/{stand2}/{mesa3}/{CORP}/{sha256}.pdf
+```
+
+Ejemplo verificado:
+```
+.../assets/temis/pdf/01/127/099/55/001/PRE/f92d13390e9c24d549e0a8beee131928086526aeee159e5f964b7caef0e1ba28.pdf
+```
+
+- `dep2`: código depto interno Registraduría (2 dígitos)
+- `mun3`: muni (3 dígitos)
+- `zon3`: zona (3 dígitos)
+- `stand2`: puesto (2 dígitos)
+- `mesa3`: mesa (3 dígitos)
+- `CORP`: acrónimo corporación — `PRE` para PRESIDENTE
+- `{sha256}.pdf`: hash SHA-256 del documento (**no enumerable**)
+
+**NO requiere captcha.** Archivos estáticos. Sólo Referer del SPA.
+
+## Arquitectura completa descubierta
+
+- Frontend: Angular SPA en `e14segundavueltapresidente.registraduria.gov.co` (Akamai)
+- API GraphQL: `apx2e14awsprodpresidenciav2.prdtpssas.com/graphql` (AWS AppSync, Akamai-fronted)
+- Auth API: AWS Cognito Identity Pool **público** `us-east-2:f44a557a-d26b-4f14-8a4d-1de5a0b0f7aa`
+  + IAM SigV4 con creds temporales unauthenticated role
+- Recaptcha siteKey: `6LeGPAstAAAAAP5Y9DpTIUqzpFv5bGrZHm6azHaS` (solo para form submission ciudadana, NO afecta PDFs estáticos)
+- GraphQL queries identificadas: `CorpIndexAndMap`, `DepartmentsTree`,
+  `TransmissionCodesByStand`, `OnTableChange` (subscription)
 
 ## Endpoints descubiertos
 
@@ -57,34 +93,36 @@ elecciones_2026/
 └── raw_v2/
 ```
 
-### 2. Descubrir patrón URL de PDFs de actas
+### 2. Descargar PDFs actas E-14 (necesita red Colombia)
 
 ```bash
-# Genera reporte con todos endpoints/paths/URLs candidatas
-python discover_pdfs.py --out discovery
+# Bajar catálogo (única vez, ~MB)
+python download_actas.py fetch-catalog --out catalog.json
+
+# Bajar PDFs sólo de Antioquia (15,801 mesas esperadas)
+python download_actas.py download --from-catalog catalog.json \
+    --depto 01 --out actas/ --workers 8 --throttle-ms 120
+
+# Bajar todos los PDFs nacionales (122k mesas, ~30GB estimado)
+python download_actas.py download --from-catalog catalog.json \
+    --out actas/ --workers 16 --throttle-ms 80
 ```
 
-Inspecciona `discovery/<host>/report.txt`. Busca rutas con `pdf`, `acta`, `e14`,
-`documento`. Una vez identificado el patrón:
+### 3. Fallback: Wayback Machine
 
-### 3. Descargar PDFs en masa
+Cuando el sitio original es inaccesible (geo-block, firewall, sitio caído),
+Wayback Machine sirve snapshots de PDFs ya archivados:
 
 ```bash
-python download_actas.py \
-    --template "https://escrutiniospresidente2026.registraduria.gov.co/api/.../{scope_code}/E14.pdf" \
-    --nomenclator elecciones_2026/nomenclator_v2.json \
-    --out actas/ \
-    --max 100 \
-    --workers 8 \
-    --throttle-ms 150
-```
+# Listar PDFs archivados
+python fetch_via_wayback.py list
 
-Placeholders disponibles en `--template`:
-- `{scope_code}` → código completo (ej. `01001`)
-- `{depto}` → 2 dígitos depto (ej. `01`)
-- `{muni}` → 3 dígitos muni (ej. `001`)
-- `{mesa}` → número de mesa (requiere `--mesa-range`)
-- `{puesto}` → número de puesto
+# Descargar todos
+python fetch_via_wayback.py download --out actas/
+
+# Forzar archivado de URL específica
+python fetch_via_wayback.py save --url "https://e14segundavueltapresidente.../xxx.pdf"
+```
 
 ## Datos verificados (snapshot 2026-06-21 21:34, 99.99% mesas)
 

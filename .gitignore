@@ -2,9 +2,20 @@
 elecciones_2026/raw_v1/
 elecciones_2026/raw_v2/
 
-# PDFs (se bajan con download_actas.py)
-actas/
-*.pdf
+# PDFs masivos (se bajan con download_actas.py)
+# Excepción: actas/01/127/099/55/001/PRE/*.pdf = muestra de prueba
+actas/*
+!actas/01/
+actas/01/*
+!actas/01/127/
+actas/01/127/*
+!actas/01/127/099/
+actas/01/127/099/*
+!actas/01/127/099/55/
+actas/01/127/099/55/*
+!actas/01/127/099/55/001/
+actas/01/127/099/55/001/*
+!actas/01/127/099/55/001/PRE/
 
 # Discovery output
 discovery/
